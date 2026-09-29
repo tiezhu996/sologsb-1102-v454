@@ -2,7 +2,16 @@
  * 首次打开应用时灌入的示例班社数据
  * 只在 plays 表为空时执行，保证界面第一次进入就有可点通的内容。
  */
-import { db, ROW_REVISION, type CueRow, type OperatorRow, type PlayRow, type RoleRow, type SceneRow } from './db';
+import {
+  db,
+  ROW_REVISION,
+  type CueRow,
+  type OperatorRow,
+  type PlayRow,
+  type RehearsalIssueRow,
+  type RoleRow,
+  type SceneRow,
+} from './db';
 import { uuid, nowIso } from './uuid';
 
 interface SeedSceneSpec {
@@ -287,8 +296,9 @@ export async function seedDatabase(): Promise<void> {
   const sceneRows: SceneRow[] = [];
   const roleRows: RoleRow[] = [];
   const cueRows: CueRow[] = [];
+  const issueRows: RehearsalIssueRow[] = [];
 
-  PLAYS.forEach((playSpec) => {
+  PLAYS.forEach((playSpec, playIndex) => {
     const playId = uuid();
     playRows.push({
       id: playId,
@@ -319,9 +329,13 @@ export async function seedDatabase(): Promise<void> {
         revision: ROW_REVISION,
       });
 
+      const sceneCueIds: string[] = [];
+      const sceneRoleIds: string[] = [];
+
       sceneSpec.roles.forEach((roleSpec) => {
         const operator = roleSpec.operatorIndex === null ? null : operatorRows[roleSpec.operatorIndex];
         const roleId = uuid();
+        sceneRoleIds.push(roleId);
         roleRows.push({
           id: roleId,
           sceneId,
@@ -340,8 +354,10 @@ export async function seedDatabase(): Promise<void> {
 
       sceneSpec.cues.forEach((cueSpec) => {
         const lead = cueSpec.leadOperatorIndex === null ? null : operatorRows[cueSpec.leadOperatorIndex];
+        const cueId = uuid();
+        sceneCueIds.push(cueId);
         cueRows.push({
-          id: uuid(),
+          id: cueId,
           sceneId,
           beatName: cueSpec.beatName,
           instrument: cueSpec.instrument,
@@ -353,14 +369,57 @@ export async function seedDatabase(): Promise<void> {
           revision: ROW_REVISION,
         });
       });
+
+      if (playIndex === 0 && sceneIndex === 2 && sceneCueIds[0] && sceneRoleIds[0]) {
+        const cueSpec = sceneSpec.cues[0];
+        const beatLabel = cueSpec.beatName === 'jijifeng' ? '急急风' : cueSpec.beatName === 'sijitou' ? '四击头' : '水底鱼';
+        const instrumentLabel =
+          cueSpec.instrument === 'daluo'
+            ? '大锣'
+            : cueSpec.instrument === 'bangu'
+              ? '板鼓'
+              : cueSpec.instrument === 'xiaoluo'
+                ? '小锣'
+                : '铙钹';
+        issueRows.push({
+          id: uuid(),
+          sceneId,
+          cueId: sceneCueIds[0],
+          cueBeatName: beatLabel,
+          cueInstrument: instrumentLabel,
+          cueAtSecond: cueSpec.atSecond,
+          roleId: sceneRoleIds[0],
+          roleName: sceneSpec.roles[0].name,
+          timing: 'late',
+          offsetSeconds: 1,
+          situation: '白娘子踏浪转身慢一拍，影杆与水族影件相碰，急急风先到。',
+          occurrences: [
+            {
+              id: uuid(),
+              cursorSecond: cueSpec.atSecond + 1,
+              timing: 'late',
+              offsetSeconds: 1,
+              situation: '白娘子踏浪转身慢一拍，影杆与水族影件相碰，急急风先到。',
+              recordedAt: stamp,
+            },
+          ],
+          status: 'open',
+          resolutionNotes: [],
+          resolvedAt: null,
+          createdAt: stamp,
+          updatedAt: stamp,
+          revision: ROW_REVISION,
+        });
+      }
     });
   });
 
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.rehearsalIssues], async () => {
     await db.operators.bulkPut(operatorRows);
     await db.plays.bulkPut(playRows);
     await db.scenes.bulkPut(sceneRows);
     await db.roles.bulkPut(roleRows);
     await db.cues.bulkPut(cueRows);
+    await db.rehearsalIssues.bulkPut(issueRows);
   });
 }

@@ -142,6 +142,31 @@ body::before {
   box-shadow: 0 0 0 1px rgba(43, 26, 18, 0.35);
 }
 
+.gb-cue-dot.has-issue i {
+  box-shadow: 0 0 0 2px rgba(207, 58, 48, 0.72);
+}
+
+.gb-cue-issue {
+  position: absolute;
+  top: -8px;
+  right: -11px;
+  min-width: 16px;
+  height: 16px;
+  line-height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #cf3a30;
+  color: #fffdf8;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  border: 1px solid #fffdf8;
+}
+
+.gb-issue-stale {
+  background: rgba(207, 58, 48, 0.06) !important;
+}
+
 .gb-cue-dot b {
   font-weight: 600;
   color: rgba(43, 26, 18, 0.78);

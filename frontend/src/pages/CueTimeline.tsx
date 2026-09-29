@@ -15,6 +15,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Radio,
   Row,
   Select,
   Slider,
@@ -31,14 +32,18 @@ import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
   CaretRightOutlined,
+  CheckCircleOutlined,
   DeleteOutlined,
   EditOutlined,
+  HistoryOutlined,
+  LinkOutlined,
   PauseOutlined,
   PlusOutlined,
   ReloadOutlined,
   SoundOutlined,
   TeamOutlined,
   ThunderboltOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { SceneCard } from '../components/common/SceneCard';
 import { EmptyState } from '../components/common/EmptyState';
@@ -60,12 +65,24 @@ import {
   type CueDraft,
 } from '../types/cue';
 import {
+  ISSUE_STATUS_LABEL,
+  ISSUE_TIMING_LABEL,
+  createEmptyIssueDraft,
+  type IssueDraft,
+  type IssueTiming,
+} from '../types/rehearsalIssue';
+import {
   ROW_REVISION,
   getScene,
   listCuesByScene,
+  listIssuesByScene,
+  listRolesByScene,
   putCue,
+  putIssue,
   removeCue,
   type CueRow,
+  type RehearsalIssueRow,
+  type RoleRow,
   type SceneRow,
 } from '../utils/db';
 import { buildRulerTicks, secondsToPercent, secondsToTimecode, timecodeToSeconds } from '../utils/timecode';
@@ -76,9 +93,13 @@ export default function CueTimeline() {
   const navigate = useNavigate();
   const { message, modal } = App.useApp();
   const [form] = Form.useForm<CueDraft>();
+  const [issueForm] = Form.useForm<IssueDraft>();
+  const [resolutionForm] = Form.useForm<{ resolutionNote: string }>();
 
   const [scene, setScene] = useState<SceneRow | null>(null);
   const [cues, setCues] = useState<CueRow[]>([]);
+  const [roles, setRoles] = useState<RoleRow[]>([]);
+  const [issues, setIssues] = useState<RehearsalIssueRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [cursorSecond, setCursorSecond] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -86,17 +107,31 @@ export default function CueTimeline() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingCueId, setEditingCueId] = useState<string | null>(null);
   const [activeCueId, setActiveCueId] = useState<string | null>(null);
+  const [issueModalOpen, setIssueModalOpen] = useState(false);
+  const [editingIssueId, setEditingIssueId] = useState<string | null>(null);
+  const [resolutionOpen, setResolutionOpen] = useState(false);
+  const [resolvingIssueId, setResolvingIssueId] = useState<string | null>(null);
+  const [relinkIssueId, setRelinkIssueId] = useState<string | null>(null);
+  const [relinkIssueFormValue, setRelinkIssueFormValue] = useState<string | null>(null);
 
   const operators = useOperatorStore((state) => state.operators);
   const loadOperators = useOperatorStore((state) => state.loadOperators);
   const loadScenes = useSceneStore((state) => state.loadScenes);
+  const updateScene = useSceneStore((state) => state.updateScene);
   const plays = usePlayStore((state) => state.plays);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [sceneRow, cueRows] = await Promise.all([getScene(sceneId), listCuesByScene(sceneId)]);
+    const [sceneRow, cueRows, roleRows, issueRows] = await Promise.all([
+      getScene(sceneId),
+      listCuesByScene(sceneId),
+      listRolesByScene(sceneId),
+      listIssuesByScene(sceneId),
+    ]);
     setScene(sceneRow ?? null);
     setCues(cueRows);
+    setRoles(roleRows);
+    setIssues(issueRows);
     setLoading(false);
     if (sceneRow) {
       await Promise.all([loadScenes(sceneRow.playId), loadOperators()]);
@@ -118,6 +153,33 @@ export default function CueTimeline() {
   const durationSecond = scene ? Math.max(1, scene.durationMin) * 60 : 60;
   const ticks = useMemo(() => buildRulerTicks(durationSecond), [durationSecond]);
   const sortedCues = useMemo(() => [...cues].sort((a, b) => a.atSecond - b.atSecond), [cues]);
+  const cueById = useMemo(() => new Map(cues.map((cue) => [cue.id, cue])), [cues]);
+  const nearestCue = useMemo(() => {
+    if (sortedCues.length === 0) return null;
+    return sortedCues.reduce((nearest, cue) =>
+      Math.abs(cue.atSecond - cursorSecond) < Math.abs(nearest.atSecond - cursorSecond) ? cue : nearest,
+    );
+  }, [cursorSecond, sortedCues]);
+  const openIssues = useMemo(() => issues.filter((issue) => issue.status === 'open'), [issues]);
+  const staleIssueIds = useMemo(() => {
+    const ids = new Set<string>();
+    openIssues.forEach((issue) => {
+      const cue = cueById.get(issue.cueId);
+      if (!cue || cue.atSecond !== issue.cueAtSecond) ids.add(issue.id);
+    });
+    return ids;
+  }, [cueById, openIssues]);
+  const issueCountByCue = useMemo(() => {
+    const map = new Map<string, number>();
+    openIssues.forEach((issue) => {
+      map.set(issue.cueId, (map.get(issue.cueId) ?? 0) + 1);
+    });
+    return map;
+  }, [openIssues]);
+  const staleOpenIssueIds = useMemo(
+    () => openIssues.filter((issue) => staleIssueIds.has(issue.id)).map((issue) => issue.id),
+    [openIssues, staleIssueIds],
+  );
 
   /** 试排播放：按秒推进游标，到时辰停止 */
   const lastFrameRef = useRef<number>(0);
@@ -205,6 +267,7 @@ export default function CueTimeline() {
     if (editingCueId) {
       const target = cues.find((cue) => cue.id === editingCueId);
       if (target) {
+        const secondChanged = target.atSecond !== atSecond;
         const next: CueRow = {
           ...target,
           beatName: values.beatName,
@@ -217,7 +280,16 @@ export default function CueTimeline() {
         };
         await putCue(next);
         setCues((prev) => prev.map((cue) => (cue.id === next.id ? next : cue)));
-        message.success('锣鼓点已更新');
+        if (secondChanged) {
+          const linkedCount = openIssues.filter((issue) => issue.cueId === target.id).length;
+          message.warning(
+            linkedCount > 0
+              ? `秒点已改动，${linkedCount} 条排练问题保留，请重新挂点确认`
+              : '锣鼓点已更新；秒点变化不会改动历史排练问题',
+          );
+        } else {
+          message.success('锣鼓点已更新');
+        }
       }
     } else {
       const row: CueRow = {
@@ -240,17 +312,179 @@ export default function CueTimeline() {
   };
 
   const handleDelete = (cue: CueRow) => {
+    const linkedOpenCount = openIssues.filter((issue) => issue.cueId === cue.id).length;
     modal.confirm({
       title: `删除 ${secondsToTimecode(cue.atSecond)} 的「${BEAT_NAME_LABEL[cue.beatName]}」？`,
+      content:
+        linkedOpenCount > 0
+          ? `有 ${linkedOpenCount} 条未处理排练问题会保留，并标记为待重新挂点。`
+          : '历史排练问题不会随鼓点删除。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
         await removeCue(cue.id);
         setCues((prev) => prev.filter((item) => item.id !== cue.id));
-        message.success('鼓点已删除');
+        message.success(linkedOpenCount > 0 ? '鼓点已删除，排练问题待重新挂点' : '鼓点已删除');
       },
     });
+  };
+
+  const openIssueCreate = () => {
+    if (!nearestCue) {
+      message.warning('本场还没有锣鼓点，请先插入鼓点再记排练问题');
+      return;
+    }
+    if (roles.length === 0) {
+      message.warning('本场还没有影人，请先到角色指派页登记涉及影人');
+      return;
+    }
+    setEditingIssueId(null);
+    const draft = createEmptyIssueDraft(nearestCue.id, roles[0]?.id ?? null);
+    issueForm.setFieldsValue(draft);
+    setIssueModalOpen(true);
+  };
+
+  const openIssueRepeat = (issue: RehearsalIssueRow) => {
+    setEditingIssueId(issue.id);
+    issueForm.setFieldsValue({
+      cueId: issue.cueId,
+      roleId: issue.roleId,
+      timing: issue.timing,
+      offsetSeconds: issue.offsetSeconds,
+      situation: '',
+    });
+    setIssueModalOpen(true);
+  };
+
+  const buildIssueSnapshot = (cue: CueRow) => ({
+    cueBeatName: BEAT_NAME_LABEL[cue.beatName],
+    cueInstrument: INSTRUMENT_LABEL[cue.instrument],
+    cueAtSecond: cue.atSecond,
+  });
+
+  const submitIssue = async () => {
+    const values = await issueForm.validateFields();
+    if (!scene) return;
+    const cue = cues.find((item) => item.id === values.cueId);
+    if (!cue) {
+      message.warning('所选锣鼓点已不存在，请重新挂点');
+      return;
+    }
+    const role = roles.find((item) => item.id === values.roleId) ?? null;
+    if (!role) {
+      message.warning('请重新选择涉及影人');
+      return;
+    }
+    const stamp = nowIso();
+    const timing: IssueTiming = values.timing;
+    const offsetSeconds = Math.max(0.5, Math.round(Math.abs(values.offsetSeconds) * 2) / 2);
+    const situation = values.situation.trim();
+    const occurrence = {
+      id: uuid(),
+      cursorSecond: Math.round(cursorSecond),
+      timing,
+      offsetSeconds,
+      situation,
+      recordedAt: stamp,
+    };
+
+    if (editingIssueId) {
+      const target = issues.find((issue) => issue.id === editingIssueId);
+      if (!target) return;
+      const next: RehearsalIssueRow = {
+        ...target,
+        ...buildIssueSnapshot(cue),
+        cueId: cue.id,
+        roleId: role.id,
+        roleName: role.name,
+        timing,
+        offsetSeconds,
+        situation,
+        occurrences: [...target.occurrences, occurrence],
+        status: 'open',
+        resolvedAt: null,
+        updatedAt: stamp,
+        revision: ROW_REVISION,
+      };
+      await putIssue(next);
+      setIssues((prev) => [next, ...prev.filter((issue) => issue.id !== next.id)]);
+      message.success('同一处问题已追加新的现场记录');
+    } else {
+      const row: RehearsalIssueRow = {
+        id: uuid(),
+        sceneId,
+        cueId: cue.id,
+        ...buildIssueSnapshot(cue),
+        roleId: role.id,
+        roleName: role.name,
+        timing,
+        offsetSeconds,
+        situation,
+        occurrences: [occurrence],
+        status: 'open',
+        resolutionNotes: [],
+        resolvedAt: null,
+        createdAt: stamp,
+        updatedAt: stamp,
+        revision: ROW_REVISION,
+      };
+      await putIssue(row);
+      setIssues((prev) => [row, ...prev]);
+      message.success('排练问题已记入场次时间轴');
+    }
+    if (scene.progress >= 100) {
+      await updateScene(scene.id, { progress: 99 });
+      setScene((prev) => (prev ? { ...prev, progress: 99 } : prev));
+      message.warning('本场存在未处理问题，不能标成可上演，已调整为 99%');
+    }
+    setIssueModalOpen(false);
+    issueForm.resetFields();
+  };
+
+  const openResolve = (issue: RehearsalIssueRow) => {
+    setResolvingIssueId(issue.id);
+    resolutionForm.setFieldsValue({ resolutionNote: '' });
+    setResolutionOpen(true);
+  };
+
+  const submitResolution = async () => {
+    const values = await resolutionForm.validateFields();
+    const target = issues.find((issue) => issue.id === resolvingIssueId);
+    if (!target) return;
+    const stamp = nowIso();
+    const next: RehearsalIssueRow = {
+      ...target,
+      status: 'resolved',
+      resolvedAt: stamp,
+      resolutionNotes: [...target.resolutionNotes, { id: uuid(), note: values.resolutionNote.trim(), createdAt: stamp }],
+      updatedAt: stamp,
+      revision: ROW_REVISION,
+    };
+    await putIssue(next);
+    setIssues((prev) => [next, ...prev.filter((issue) => issue.id !== next.id)]);
+    setResolutionOpen(false);
+    setResolvingIssueId(null);
+    resolutionForm.resetFields();
+    message.success('已在原记录补处理说明');
+  };
+
+  const relinkIssue = async (nextCueId: string) => {
+    const target = issues.find((issue) => issue.id === relinkIssueId);
+    const cue = cues.find((item) => item.id === nextCueId);
+    if (!target || !cue) return;
+    const stamp = nowIso();
+    const next: RehearsalIssueRow = {
+      ...target,
+      cueId: cue.id,
+      ...buildIssueSnapshot(cue),
+      updatedAt: stamp,
+      revision: ROW_REVISION,
+    };
+    await putIssue(next);
+    setIssues((prev) => [next, ...prev.filter((issue) => issue.id !== next.id)]);
+    setRelinkIssueId(null);
+    message.success('排练问题已重新挂到该锣鼓点');
   };
 
   const columns: ColumnsType<CueRow> = [
@@ -278,6 +512,13 @@ export default function CueTimeline() {
             </Button>
           </Tooltip>
           {activeCueId === record.id ? <Tag color="gold">当前</Tag> : null}
+          {(issueCountByCue.get(record.id) ?? 0) > 0 ? (
+            <Tooltip title="该鼓点有未处理排练问题">
+              <Tag color="error" icon={<WarningOutlined />}>
+                {issueCountByCue.get(record.id)} 问题
+              </Tag>
+            </Tooltip>
+          ) : null}
         </Space>
       ),
     },
@@ -356,6 +597,94 @@ export default function CueTimeline() {
     },
   ];
 
+  const issueColumns: ColumnsType<RehearsalIssueRow> = [
+    {
+      title: '挂点 / 偏差',
+      key: 'cue',
+      width: 210,
+      render: (_value, record) => {
+        const linkedCue = cueById.get(record.cueId);
+        const stale = staleIssueIds.has(record.id);
+        return (
+          <Space direction="vertical" size={3}>
+            <Space size={4} wrap>
+              <Tag color={stale ? 'error' : '#7a1f1f'} className="gb-mono">
+                {secondsToTimecode(record.cueAtSecond)}
+              </Tag>
+              <Tag color="volcano">{record.cueBeatName}</Tag>
+              {stale ? <Tag color="error">待重新挂点</Tag> : null}
+            </Space>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {record.cueInstrument}
+              {linkedCue && linkedCue.atSecond !== record.cueAtSecond
+                ? `，现秒点 ${secondsToTimecode(linkedCue.atSecond)}`
+                : !linkedCue
+                  ? '，原鼓点已删除'
+                  : ''}
+            </Typography.Text>
+            <Space size={4}>
+              <Tag color={record.timing === 'early' ? 'orange' : 'blue'}>
+                {ISSUE_TIMING_LABEL[record.timing]} {record.offsetSeconds} 秒
+              </Tag>
+              <Tag>出现 {record.occurrences.length} 次</Tag>
+            </Space>
+          </Space>
+        );
+      },
+    },
+    {
+      title: '影人 / 现场情况',
+      key: 'detail',
+      render: (_value, record) => (
+        <Space direction="vertical" size={3} style={{ width: '100%' }}>
+          <Space size={4} wrap>
+            <Tag color="magenta">{record.roleName || '未指定影人'}</Tag>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              最近记录游标 {secondsToTimecode(record.occurrences.at(-1)?.cursorSecond ?? record.cueAtSecond)}
+            </Typography.Text>
+          </Space>
+          <Typography.Text>{record.situation}</Typography.Text>
+          {record.resolutionNotes.length > 0 ? (
+            <Typography.Text type="success" style={{ fontSize: 12 }}>
+              处理：{record.resolutionNotes.at(-1)?.note}
+            </Typography.Text>
+          ) : null}
+        </Space>
+      ),
+    },
+    {
+      title: '状态 / 操作',
+      key: 'issueActions',
+      width: 240,
+      render: (_value, record) => (
+        <Space direction="vertical" size={6}>
+          <Tag color={record.status === 'open' ? 'error' : 'success'}>{ISSUE_STATUS_LABEL[record.status]}</Tag>
+          <Space size={4} wrap>
+            <Button size="small" icon={<HistoryOutlined />} onClick={() => openIssueRepeat(record)}>
+              再记一次
+            </Button>
+            {record.status === 'open' ? (
+              <Button size="small" type="primary" ghost icon={<CheckCircleOutlined />} onClick={() => openResolve(record)}>
+                处理
+              </Button>
+            ) : null}
+            <Button
+              size="small"
+              icon={<LinkOutlined />}
+              disabled={sortedCues.length === 0}
+              onClick={() => {
+                setRelinkIssueId(record.id);
+                setRelinkIssueFormValue(cueById.has(record.cueId) ? record.cueId : nearestCue?.id ?? null);
+              }}
+            >
+              重新挂点
+            </Button>
+          </Space>
+        </Space>
+      ),
+    },
+  ];
+
   if (!loading && !scene) {
     return (
       <div className="gb-panel">
@@ -372,7 +701,6 @@ export default function CueTimeline() {
   const sceneIndex = items.findIndex((item) => item.scene.id === sceneId);
   const prevItem = sceneIndex > 0 ? items[sceneIndex - 1] : null;
   const nextItem = sceneIndex >= 0 && sceneIndex < items.length - 1 ? items[sceneIndex + 1] : null;
-  const passedCount = sortedCues.filter((cue) => cue.atSecond <= cursorSecond).length;
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -391,6 +719,9 @@ export default function CueTimeline() {
           <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={() => openCreate()}>
               在游标处插入鼓点
+            </Button>
+            <Button danger ghost icon={<WarningOutlined />} disabled={cues.length === 0} onClick={openIssueCreate}>
+              记录排练问题
             </Button>
             <Button
               icon={<TeamOutlined />}
@@ -416,9 +747,23 @@ export default function CueTimeline() {
             <Statistic title="试排游标" value={secondsToTimecode(cursorSecond)} className="gb-mono" />
           </Col>
           <Col xs={12} md={6}>
-            <Statistic title="已过鼓点" value={passedCount} suffix={`/ ${cues.length}`} />
+            <Statistic title="未处理排练问题" value={openIssues.length} suffix={`/ ${issues.length}`} />
           </Col>
         </Row>
+        {openIssues.length > 0 ? (
+          <Alert
+            style={{ marginTop: 12 }}
+            type={staleOpenIssueIds.length > 0 ? 'error' : 'warning'}
+            showIcon
+            icon={<WarningOutlined />}
+            message={
+              staleOpenIssueIds.length > 0
+                ? `${staleOpenIssueIds.length} 条问题需要重新挂点；本场可继续排，但不能标成可上演。`
+                : `本场有 ${openIssues.length} 条未处理排练问题；处理完后才可标记可上演。`
+            }
+            description={staleOpenIssueIds.length > 0 ? '原锣鼓点已删除或秒点已改动，历史记录已保留。' : '同一处问题可在记录中反复追加，处理说明会补在原记录上。'}
+          />
+        ) : null}
       </div>
 
       <Row gutter={16}>
@@ -516,7 +861,7 @@ export default function CueTimeline() {
                 {sortedCues.map((cue) => (
                   <div
                     key={cue.id}
-                    className="gb-cue-dot"
+                    className={`gb-cue-dot ${(issueCountByCue.get(cue.id) ?? 0) > 0 ? 'has-issue' : ''}`}
                     style={{ left: `${secondsToPercent(cue.atSecond, durationSecond)}%` }}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -534,6 +879,9 @@ export default function CueTimeline() {
                         transition: 'transform 0.18s ease',
                       }}
                     />
+                    {(issueCountByCue.get(cue.id) ?? 0) > 0 ? (
+                      <em className="gb-cue-issue gb-mono">!</em>
+                    ) : null}
                     <span style={{ color: 'rgba(43,26,18,0.7)' }}>
                       {BEAT_NAME_LABEL[cue.beatName]}·{INSTRUMENT_LABEL[cue.instrument]}
                     </span>
@@ -572,6 +920,9 @@ export default function CueTimeline() {
               />
               <Button icon={<ThunderboltOutlined />} onClick={() => openCreate(Math.round(cursorSecond))}>
                 在游标 {secondsToTimecode(Math.round(cursorSecond))} 插点
+              </Button>
+              <Button danger ghost icon={<WarningOutlined />} disabled={!nearestCue} onClick={openIssueCreate}>
+                记游标附近问题{nearestCue ? ` · ${BEAT_NAME_LABEL[nearestCue.beatName]}` : ''}
               </Button>
               {followCursor && sortedCues.length > 0 ? (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -650,6 +1001,57 @@ export default function CueTimeline() {
                 pagination={false}
                 rowClassName={(record) => (activeCueId === record.id ? 'gb-row-active' : '')}
                 locale={{ emptyText: <Empty description="暂无鼓点" /> }}
+              />
+            )}
+          </div>
+
+          <div className="gb-panel" style={{ marginTop: 16 }}>
+            <div className="gb-panel-title">
+              <Space size={8} wrap>
+                <Typography.Text strong>排练问题（挂在场次时间轴）</Typography.Text>
+                <Tag color="error">未处理 {openIssues.length}</Tag>
+                <Tag>全部 {issues.length}</Tag>
+              </Space>
+              <Button danger ghost size="small" icon={<WarningOutlined />} disabled={cues.length === 0} onClick={openIssueCreate}>
+                从游标附近记一条
+              </Button>
+            </div>
+            {issues.length === 0 ? (
+              <EmptyState
+                size="small"
+                title="还没有排练问题"
+                description="试排时若鼓点和影人动作没合上，选择游标附近锣鼓点，记录早到/晚到几秒、涉及影人和现场情况。"
+                actionText="记录第一条"
+                onAction={openIssueCreate}
+              />
+            ) : (
+              <Table<RehearsalIssueRow>
+                rowKey="id"
+                size="small"
+                className="gb-table-compact"
+                loading={loading}
+                columns={issueColumns}
+                dataSource={issues}
+                pagination={false}
+                expandable={{
+                  expandedRowRender: (record) => (
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Typography.Text strong>同一处反复出现记录</Typography.Text>
+                      {record.occurrences.map((occurrence) => (
+                        <Typography.Text key={occurrence.id} style={{ fontSize: 12 }}>
+                          {occurrence.recordedAt}｜游标 {secondsToTimecode(occurrence.cursorSecond)}｜
+                          {ISSUE_TIMING_LABEL[occurrence.timing]} {occurrence.offsetSeconds} 秒｜{occurrence.situation}
+                        </Typography.Text>
+                      ))}
+                      {record.resolutionNotes.map((note) => (
+                        <Typography.Text key={note.id} type="success" style={{ fontSize: 12 }}>
+                          处理说明（{note.createdAt}）：{note.note}
+                        </Typography.Text>
+                      ))}
+                    </Space>
+                  ),
+                }}
+                rowClassName={(record) => (staleIssueIds.has(record.id) ? 'gb-issue-stale' : '')}
               />
             )}
           </div>
@@ -784,6 +1186,137 @@ export default function CueTimeline() {
             提示：急急风适合开打与催台，四击头用于亮相，水底鱼多作垫场与转场。
           </Typography.Text>
         </Form>
+      </Modal>
+
+      <Modal
+        open={issueModalOpen}
+        title={editingIssueId ? '同一处再出现一次' : `记录排练问题（游标 ${secondsToTimecode(Math.floor(cursorSecond))} 附近）`}
+        okText={editingIssueId ? '追加记录' : '记入时间轴'}
+        cancelText="取消"
+        onCancel={() => {
+          setIssueModalOpen(false);
+          setEditingIssueId(null);
+          issueForm.resetFields();
+        }}
+        onOk={() => void submitIssue()}
+      >
+        <Form form={issueForm} layout="vertical">
+          <Form.Item name="cueId" label="锣鼓点（默认选游标附近最近一处）" rules={[{ required: true, message: '请选择锣鼓点' }]}>
+            <Select
+              options={[...sortedCues]
+                .sort(
+                  (a, b) =>
+                    Math.abs(a.atSecond - cursorSecond) - Math.abs(b.atSecond - cursorSecond) ||
+                    a.atSecond - b.atSecond,
+                )
+                .map((cue) => {
+                  const distance = Math.abs(cue.atSecond - cursorSecond);
+                  const prefix = cue.id === nearestCue?.id ? '游标最近 · ' : `距游标 ${Math.round(distance)} 秒 · `;
+                  return {
+                    value: cue.id,
+                    label: `${prefix}${secondsToTimecode(cue.atSecond)} ${BEAT_NAME_LABEL[cue.beatName]} · ${INSTRUMENT_LABEL[cue.instrument]}`,
+                  };
+                })}
+            />
+          </Form.Item>
+          <Form.Item name="roleId" label="涉及影人" rules={[{ required: true, message: '请选择涉及影人' }]}>
+            <Select
+              placeholder="选择本场影人"
+              options={roles.map((role) => ({ value: role.id, label: `${role.name}（${role.operatorId ? '已指派操耍人' : '未指派'}）` }))}
+            />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="timing" label="偏差方向" rules={[{ required: true, message: '请选择方向' }]}>
+                <Radio.Group
+                  optionType="button"
+                  buttonStyle="solid"
+                  options={[
+                    { value: 'early', label: '鼓点早到' },
+                    { value: 'late', label: '鼓点晚到' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                name="offsetSeconds"
+                label="相差秒数"
+                rules={[{ required: true, message: '请填写秒数' }]}
+              >
+                <InputNumber min={0.5} max={60} step={0.5} addonAfter="秒" style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="situation" label="现场情况" rules={[{ required: true, message: '写明现场情况，散场后可对照修改' }, { max: 160, message: '不超过 160 个字' }]}>
+            <Input.TextArea
+              rows={4}
+              maxLength={160}
+              showCount
+              placeholder="如：白娘子起伞慢半拍，影件在左杆上挂了一下，四击头先落。"
+            />
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            同一处可反复记录；未处理时本场仍可继续排，但不能标成可上演。
+          </Typography.Text>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={resolutionOpen}
+        title="处理排练问题"
+        okText="补说明并标记已处理"
+        cancelText="取消"
+        onCancel={() => {
+          setResolutionOpen(false);
+          setResolvingIssueId(null);
+          resolutionForm.resetFields();
+        }}
+        onOk={() => void submitResolution()}
+      >
+        <Form form={resolutionForm} layout="vertical">
+          <Form.Item
+            name="resolutionNote"
+            label="处理说明（补在原记录）"
+            rules={[{ required: true, message: '请填写如何处理' }, { max: 160, message: '不超过 160 个字' }]}
+          >
+            <Input.TextArea rows={4} maxLength={160} showCount placeholder="如：已把四击头后移 1 秒，并提醒操耍人提前起伞，下轮合乐通过。" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={relinkIssueId !== null}
+        title="重新挂锣鼓点"
+        okText="挂到所选鼓点"
+        cancelText="取消"
+        onCancel={() => setRelinkIssueId(null)}
+        onOk={() => {
+          const selected = relinkIssueFormValue;
+          if (selected) void relinkIssue(selected);
+        }}
+      >
+        {(() => {
+          const target = issues.find((issue) => issue.id === relinkIssueId);
+          if (!target) return null;
+          return (
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Typography.Text>
+                原记录：{secondsToTimecode(target.cueAtSecond)} {target.cueBeatName}，{target.roleName || '未指定影人'}。
+              </Typography.Text>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="选择现有的锣鼓点"
+                value={relinkIssueFormValue}
+                onChange={setRelinkIssueFormValue}
+                options={sortedCues.map((cue) => ({
+                  value: cue.id,
+                  label: `${secondsToTimecode(cue.atSecond)} ${BEAT_NAME_LABEL[cue.beatName]} · ${INSTRUMENT_LABEL[cue.instrument]}`,
+                }))}
+              />
+            </Space>
+          );
+        })()}
       </Modal>
     </Space>
   );

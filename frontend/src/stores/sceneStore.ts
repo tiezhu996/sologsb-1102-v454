@@ -6,6 +6,7 @@ import { create } from 'zustand';
 import {
   ROW_REVISION,
   listScenesByPlay,
+  listIssuesByScene,
   putScene,
   putScenes,
   removeScene,
@@ -105,10 +106,17 @@ export const useSceneStore = create<SceneStoreState>((set, get) => ({
   async updateScene(sceneId, patch) {
     const existing = get().scenes.find((scene) => scene.id === sceneId);
     if (!existing) return;
+    let progress = patch.progress === undefined ? existing.progress : clampProgress(patch.progress);
+    if (progress >= 100) {
+      const openIssues = await listIssuesByScene(sceneId);
+      if (openIssues.some((issue) => issue.status === 'open')) {
+        progress = Math.min(progress, 99);
+      }
+    }
     const next: SceneRow = {
       ...existing,
       ...patch,
-      progress: patch.progress === undefined ? existing.progress : clampProgress(patch.progress),
+      progress,
       updatedAt: nowIso(),
       revision: ROW_REVISION,
     };

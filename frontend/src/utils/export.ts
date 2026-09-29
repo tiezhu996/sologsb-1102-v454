@@ -7,8 +7,10 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { RehearsalIssue } from '../types/rehearsalIssue';
 import { secondsToTimecode } from './timecode';
 import { BEAT_NAME_LABEL, INSTRUMENT_LABEL } from '../types/cue';
+import { ISSUE_TIMING_LABEL } from '../types/rehearsalIssue';
 import { ROLE_TYPE_LABEL, PROP_PART_LABEL } from '../types/role';
 import { PLAY_GENRE_LABEL, PLAY_STATUS_LABEL } from '../types/play';
 import { SHADOW_SCREEN_LABEL } from '../types/scene';
@@ -43,6 +45,8 @@ export interface ExportBundle {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  /** 兼容 v2 旧存档导入；当前导出会包含该字段 */
+  rehearsalIssues?: RehearsalIssue[];
 }
 
 /** 导出整库 JSON 存档 */
@@ -64,6 +68,7 @@ export function exportPlayCsv(
   scenes: Scene[],
   roles: ShadowRole[],
   cues: PercussionCue[],
+  issues: RehearsalIssue[],
   operators: Operator[],
 ): string {
   const operatorName = (id: string | null): string => {
@@ -125,6 +130,43 @@ export function exportPlayCsv(
       }
     });
 
+  const openIssues = issues
+    .filter((issue) => issue.status === 'open')
+    .sort((a, b) => {
+      const sceneA = scenes.find((scene) => scene.id === a.sceneId);
+      const sceneB = scenes.find((scene) => scene.id === b.sceneId);
+      return (sceneA?.seq ?? 0) - (sceneB?.seq ?? 0) || b.updatedAt.localeCompare(a.updatedAt);
+    });
+  lines.push('');
+  lines.push(csvCell('\u672A\u5904\u7406\u6392\u7EC3\u95EE\u9898\u6E05\u5355'));
+  lines.push(
+    ['\u573A\u5E8F', '\u573A\u6B21', '\u9523\u9F13\u70B9', '\u79D2\u70B9', '\u5F71\u4EBA', '\u504F\u5DEE', '\u73B0\u573A\u60C5\u51B5', '\u51FA\u73B0\u6B21\u6570', '\u6700\u8FD1\u8BB0\u5F55']
+      .map(csvCell)
+      .join(','),
+  );
+  if (openIssues.length === 0) {
+    lines.push(csvCell('\u65E0\u672A\u5904\u7406\u95EE\u9898'));
+  } else {
+    openIssues.forEach((issue) => {
+      const scene = scenes.find((item) => item.id === issue.sceneId);
+      lines.push(
+        [
+          scene?.seq ?? '',
+          scene?.title ?? '\uFF08\u573A\u6B21\u5DF2\u5220\uFF09',
+          issue.cueBeatName,
+          secondsToTimecode(issue.cueAtSecond),
+          issue.roleName || '\u672A\u6307\u5B9A\u5F71\u4EBA',
+          `${ISSUE_TIMING_LABEL[issue.timing]} ${issue.offsetSeconds} \u79D2`,
+          issue.situation,
+          issue.occurrences.length,
+          issue.updatedAt,
+        ]
+          .map(csvCell)
+          .join(','),
+      );
+    });
+  }
+
   return `\uFEFF${lines.join('\n')}`;
 }
 
@@ -134,10 +176,11 @@ export function exportPlayCsvFile(
   scenes: Scene[],
   roles: ShadowRole[],
   cues: PercussionCue[],
+  issues: RehearsalIssue[],
   operators: Operator[],
 ): string {
   const filename = `${play.title}-排练通告-${stampSuffix()}.csv`;
-  download(filename, exportPlayCsv(play, scenes, roles, cues, operators), 'text/csv;charset=utf-8');
+  download(filename, exportPlayCsv(play, scenes, roles, cues, issues, operators), 'text/csv;charset=utf-8');
   return filename;
 }
 
@@ -191,6 +234,7 @@ export function buildCallSheetText(
   play: Play,
   scenes: Scene[],
   roles: ShadowRole[],
+  issues: RehearsalIssue[],
   operators: Operator[],
 ): string {
   const operatorName = (id: string | null): string =>
@@ -213,5 +257,28 @@ export function buildCallSheetText(
         );
       });
     });
+  const openIssues = issues.filter((issue) => issue.status === 'open');
+  lines.push('');
+  lines.push(`未处理排练问题（${openIssues.length}）：`);
+  if (openIssues.length === 0) {
+    lines.push('  · 无');
+  } else {
+    openIssues
+      .sort((a, b) => {
+        const sceneA = scenes.find((scene) => scene.id === a.sceneId);
+        const sceneB = scenes.find((scene) => scene.id === b.sceneId);
+        return (sceneA?.seq ?? 0) - (sceneB?.seq ?? 0) || b.updatedAt.localeCompare(a.updatedAt);
+      })
+      .forEach((issue) => {
+        const scene = scenes.find((item) => item.id === issue.sceneId);
+        lines.push(
+          `  · 第${scene?.seq ?? '?'}场 ${scene?.title ?? '（场次已删）'}｜${secondsToTimecode(issue.cueAtSecond)} ${
+            issue.cueBeatName
+          }｜${issue.roleName || '未指定影人'}｜${ISSUE_TIMING_LABEL[issue.timing]} ${issue.offsetSeconds}秒｜${
+            issue.situation
+          }（出现 ${issue.occurrences.length} 次）`,
+        );
+      });
+  }
   return lines.join('\n');
 }

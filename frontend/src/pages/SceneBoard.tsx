@@ -2,9 +2,10 @@
  * /plays/:id/scenes 场次拆分与调序
  * 左列场序（拖拽调序 + 勾选本次排练覆盖），右侧场次明细；消费 Scene、Play，复用 <SceneCard>。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
+  Alert,
   App,
   Button,
   Checkbox,
@@ -26,10 +27,12 @@ import {
 import {
   ArrowLeftOutlined,
   CheckSquareOutlined,
+  DownloadOutlined,
   PlusOutlined,
   SaveOutlined,
   SoundOutlined,
   TeamOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { SceneCard } from '../components/common/SceneCard';
 import { EmptyState } from '../components/common/EmptyState';
@@ -42,6 +45,13 @@ import { SHADOW_SCREEN_LABEL, SHADOW_SCREEN_OPTIONS, type SceneDraft, createEmpt
 import { minutesToReadable } from '../utils/timecode';
 import { formatStamp } from '../utils/uuid';
 import type { SceneRow } from '../utils/db';
+import {
+  listAllRoles,
+  listCuesByScenes,
+  listIssuesByScenes,
+  listOperators,
+} from '../utils/db';
+import { exportPlayCsvFile } from '../utils/export';
 
 export default function SceneBoard() {
   const { id: playId = '' } = useParams<{ id: string }>();
@@ -82,6 +92,8 @@ export default function SceneBoard() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [openIssueCountByScene, setOpenIssueCountByScene] = useState<Record<string, number>>({});
+  const [exporting, setExporting] = useState(false);
 
   const play = plays.find((item) => item.id === playId) ?? null;
   const playStat = statOf(playId);
@@ -100,6 +112,23 @@ export default function SceneBoard() {
   useEffect(() => {
     if (playId && !loading) void syncSceneCount(playId);
   }, [playId, loading, syncSceneCount]);
+
+  const loadOpenIssueCounts = useCallback(async () => {
+    if (scenes.length === 0) {
+      setOpenIssueCountByScene({});
+      return;
+    }
+    const issueRows = await listIssuesByScenes(scenes.map((scene) => scene.id));
+    const counts: Record<string, number> = {};
+    issueRows.forEach((issue) => {
+      if (issue.status === 'open') counts[issue.sceneId] = (counts[issue.sceneId] ?? 0) + 1;
+    });
+    setOpenIssueCountByScene(counts);
+  }, [scenes]);
+
+  useEffect(() => {
+    void loadOpenIssueCounts();
+  }, [loadOpenIssueCounts]);
 
   const activeItem = useMemo(() => items.find((item) => item.scene.id === activeSceneId) ?? null, [items, activeSceneId]);
   const visibleItems = onlySelected ? items.filter((item) => selectedSceneIds.includes(item.scene.id)) : items;
@@ -158,6 +187,27 @@ export default function SceneBoard() {
     });
   };
 
+  const handleExportCallSheet = async () => {
+    if (!play) return;
+    setExporting(true);
+    try {
+      const sceneIds = scenes.map((scene) => scene.id);
+      const [roleRows, cueRows, issueRows, operatorRows] = await Promise.all([
+        listAllRoles(),
+        listCuesByScenes(sceneIds),
+        listIssuesByScenes(sceneIds),
+        listOperators(),
+      ]);
+      const playRoles = roleRows.filter((role) => sceneIds.includes(role.sceneId));
+      const playCues = cueRows.filter((cue) => sceneIds.includes(cue.sceneId));
+      const playIssues = issueRows.filter((issue) => sceneIds.includes(issue.sceneId));
+      const filename = exportPlayCsvFile(play, scenes, playRoles, playCues, playIssues, operatorRows);
+      message.success(`排练通告已导出：${filename}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (!play) {
     return (
       <div className="gb-panel">
@@ -188,6 +238,9 @@ export default function SceneBoard() {
           <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={openCreate}>
               新增场次
+            </Button>
+            <Button icon={<DownloadOutlined />} loading={exporting} onClick={() => void handleExportCallSheet()}>
+              导出排练通告
             </Button>
             <Button
               icon={<TeamOutlined />}
@@ -313,9 +366,16 @@ export default function SceneBoard() {
                             void handleReorder(item.scene.id);
                           }}
                           extraActions={
-                            <Tag color={selectedSceneIds.includes(item.scene.id) ? '#7a1f1f' : 'default'}>
-                              {selectedSceneIds.includes(item.scene.id) ? '本次排练' : '本次跳过'}
-                            </Tag>
+                            <Space size={4} wrap>
+                              {(openIssueCountByScene[item.scene.id] ?? 0) > 0 ? (
+                                <Tag color="error" icon={<WarningOutlined />}>
+                                  {openIssueCountByScene[item.scene.id]} 未处理
+                                </Tag>
+                              ) : null}
+                              <Tag color={selectedSceneIds.includes(item.scene.id) ? '#7a1f1f' : 'default'}>
+                                {selectedSceneIds.includes(item.scene.id) ? '本次排练' : '本次跳过'}
+                              </Tag>
+                            </Space>
                           }
                         />
                       </div>
@@ -335,6 +395,7 @@ export default function SceneBoard() {
                   startTimecode={activeItem.startTimecode}
                   accumulatedMinute={activeItem.accumulatedMinute}
                   operatorCount={operators.length}
+                  openIssueCount={openIssueCountByScene[activeItem.scene.id] ?? 0}
                   onSave={updateScene}
                   onProgress={(delta) => void bumpProgress(activeItem.scene.id, delta)}
                   onDelete={() => confirmDelete(activeItem.scene.id, activeItem.scene.title)}
@@ -404,6 +465,7 @@ interface SceneDetailPanelProps {
   startTimecode: string;
   accumulatedMinute: number;
   operatorCount: number;
+  openIssueCount: number;
   onSave: (
     sceneId: string,
     patch: Partial<Omit<SceneRow, 'id' | 'playId' | 'createdAt' | 'revision'>>,
@@ -419,6 +481,7 @@ function SceneDetailPanel({
   startTimecode,
   accumulatedMinute,
   operatorCount,
+  openIssueCount,
   onSave,
   onProgress,
   onDelete,
@@ -510,12 +573,32 @@ function SceneDetailPanel({
             <Button size="small" type="primary" ghost onClick={() => onProgress(10)}>
               +10%
             </Button>
-            <Button size="small" onClick={() => void onSave(sceneId, { progress: 100 })}>
+            <Button
+              size="small"
+              disabled={openIssueCount > 0}
+              onClick={() => {
+                if (openIssueCount > 0) {
+                  message.warning(`还有 ${openIssueCount} 条未处理排练问题，不能标成可上演`);
+                  return;
+                }
+                void onSave(sceneId, { progress: 100 });
+              }}
+            >
               标记可上演
             </Button>
           </Space>
         </Space>
         <Progress percent={scene.progress} strokeColor="#7a1f1f" />
+        {openIssueCount > 0 ? (
+          <Alert
+            style={{ marginTop: 8 }}
+            type="warning"
+            showIcon
+            icon={<WarningOutlined />}
+            message={`有 ${openIssueCount} 条未处理排练问题`}
+            description="这场仍可继续排练与调整，但处理完之前不能标成可上演。"
+          />
+        ) : null}
       </div>
 
       <Space wrap>

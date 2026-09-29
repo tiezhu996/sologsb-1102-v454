@@ -97,7 +97,7 @@ export default function App() {
                 <TeamOutlined /> 影人 {counts.roles ?? 0} · 操耍人 {operators.length}
               </span>
               <span>
-                <SoundOutlined /> 锣鼓点 {counts.cues ?? 0}
+                <SoundOutlined /> 锣鼓点 {counts.cues ?? 0} · 问题 {counts.rehearsalIssues ?? 0}
               </span>
             </Space>
           </div>
