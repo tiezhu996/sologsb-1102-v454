@@ -8,6 +8,7 @@ import {
   ROW_REVISION,
   countAll,
   getPlay,
+  listAllIssues,
   listPlays,
   listScenesByPlay,
   putPlay,
@@ -41,6 +42,8 @@ export interface PlayStat {
   averageProgress: number;
   /** 合计时长（分钟） */
   totalMinute: number;
+  /** 未处理排练问题数；存在未处理问题时不允许标为可上演 */
+  openIssueCount: number;
 }
 
 interface PlayStoreState {
@@ -82,11 +85,15 @@ export const usePlayStore = create<PlayStoreState>((set, get) => ({
     set({ loading: true, error: '' });
     try {
       const plays = await listPlays();
+      const allIssues = await listAllIssues();
+      const openIssues = allIssues.filter((issue) => issue.status === 'open');
       const current = get().currentPlayId;
       const stillExists = current !== null && plays.some((play) => play.id === current);
       const statEntries = await Promise.all(
         plays.map(async (play): Promise<[string, PlayStat]> => {
           const scenes = await listScenesByPlay(play.id);
+          const sceneIds = new Set(scenes.map((scene) => scene.id));
+          const openIssueCount = openIssues.filter((issue) => sceneIds.has(issue.sceneId)).length;
           const totalMinute = scenes.reduce(
             (acc, scene) => acc + (Number.isFinite(scene.durationMin) ? scene.durationMin : 0),
             0,
@@ -95,12 +102,21 @@ export const usePlayStore = create<PlayStoreState>((set, get) => ({
             scenes.length === 0
               ? 0
               : Math.round(scenes.reduce((acc, scene) => acc + scene.progress, 0) / scenes.length);
-          return [play.id, { playId: play.id, sceneCount: scenes.length, averageProgress, totalMinute }];
+          return [play.id, { playId: play.id, sceneCount: scenes.length, averageProgress, totalMinute, openIssueCount }];
         }),
       );
-      set({ plays, loading: false, playStats: Object.fromEntries(statEntries) });
+      const stats = Object.fromEntries(statEntries);
+      const correctedPlays = await Promise.all(
+        plays.map(async (play) => {
+          if (play.status !== 'ready' || (stats[play.id]?.openIssueCount ?? 0) === 0) return play;
+          const next: PlayRow = { ...play, status: 'rehearsing', updatedAt: nowIso(), revision: ROW_REVISION };
+          await putPlay(next);
+          return next;
+        }),
+      );
+      set({ plays: correctedPlays, loading: false, playStats: stats });
       if (!stillExists) {
-        get().selectPlay(plays.length > 0 ? plays[0].id : null);
+        get().selectPlay(correctedPlays.length > 0 ? correctedPlays[0].id : null);
       }
       await get().refreshCounts();
     } catch (error) {
@@ -152,6 +168,14 @@ export const usePlayStore = create<PlayStoreState>((set, get) => ({
   async updatePlay(playId, patch) {
     const existing = await getPlay(playId);
     if (!existing) return;
+    if (patch.status === 'ready') {
+      const [scenes, issues] = await Promise.all([listScenesByPlay(playId), listAllIssues()]);
+      const sceneIds = new Set(scenes.map((scene) => scene.id));
+      const openIssueCount = issues.filter((issue) => issue.status === 'open' && sceneIds.has(issue.sceneId)).length;
+      if (openIssueCount > 0) {
+        throw new Error(`还有 ${openIssueCount} 条排练问题未处理，暂不能标成可上演`);
+      }
+    }
     const next: PlayRow = { ...existing, ...patch, updatedAt: nowIso(), revision: ROW_REVISION };
     await putPlay(next);
     await get().loadPlays();
@@ -196,7 +220,7 @@ export const usePlayStore = create<PlayStoreState>((set, get) => ({
   },
 
   statOf(playId) {
-    return get().playStats[playId] ?? { playId, sceneCount: 0, averageProgress: 0, totalMinute: 0 };
+    return get().playStats[playId] ?? { playId, sceneCount: 0, averageProgress: 0, totalMinute: 0, openIssueCount: 0 };
   },
 
   async refreshCounts() {

@@ -7,6 +7,8 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { RehearsalIssue } from '../types/rehearsalIssue';
+import { describeIssueTiming } from '../types/rehearsalIssue';
 import { secondsToTimecode } from './timecode';
 import { BEAT_NAME_LABEL, INSTRUMENT_LABEL } from '../types/cue';
 import { ROLE_TYPE_LABEL, PROP_PART_LABEL } from '../types/role';
@@ -43,6 +45,7 @@ export interface ExportBundle {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  rehearsalIssues: RehearsalIssue[];
 }
 
 /** 导出整库 JSON 存档 */
@@ -65,6 +68,7 @@ export function exportPlayCsv(
   roles: ShadowRole[],
   cues: PercussionCue[],
   operators: Operator[],
+  issues: RehearsalIssue[] = [],
 ): string {
   const operatorName = (id: string | null): string => {
     if (id === null) return '待指派';
@@ -125,6 +129,44 @@ export function exportPlayCsv(
       }
     });
 
+  const sceneMap = new Map(scenes.map((scene) => [scene.id, scene]));
+  const openIssues = issues.filter((issue) => issue.status === 'open');
+  if (openIssues.length > 0) {
+    lines.push('');
+    lines.push(csvCell(`\u672A\u5904\u7406\u6392\u7EC3\u95EE\u9898\u6E05\u5355\uFF08${openIssues.length} \u6761\uFF1B\u672A\u6E05\u96F6\u524D\u4E0D\u80FD\u6807\u6210\u53EF\u4E0A\u6F14\uFF09`));
+    lines.push(
+      ['\u573A\u5E8F', '\u573A\u6B21', '\u9523\u9F13\u70B9', '\u539F\u79D2\u70B9', '\u5F53\u524D\u79D2\u70B9', '\u504F\u5DEE', '\u6D89\u53CA\u5F71\u4EBA', '\u73B0\u573A\u60C5\u51B5', '\u6302\u70B9\u72B6\u6001']
+        .map(csvCell)
+        .join(','),
+    );
+    openIssues.forEach((issue) => {
+      const issueScene = sceneMap.get(issue.sceneId);
+      const linkedCue = issue.cueId ? cues.find((cue) => cue.id === issue.cueId) : undefined;
+      const latest = issue.occurrences[issue.occurrences.length - 1];
+      const cueLabel = linkedCue ? BEAT_NAME_LABEL[linkedCue.beatName] : issue.cueBeatName || '\uFF08\u9F13\u70B9\u5DF2\u5220\uFF09';
+      const linkStatus = !linkedCue
+        ? '\u539F\u9F13\u70B9\u5DF2\u5220\u9664\uFF0C\u8BF7\u91CD\u65B0\u6302\u70B9'
+        : linkedCue.atSecond !== issue.cueAtSecond
+          ? `\u79D2\u70B9\u5DF2\u6539\u4E3A ${secondsToTimecode(linkedCue.atSecond)}\uFF0C\u8BF7\u786E\u8BA4/\u91CD\u65B0\u6302\u70B9`
+          : '\u5DF2\u6302\u70B9';
+      lines.push(
+        [
+          issueScene ? issueScene.seq : '\u573A\u6B21\u5DF2\u5220',
+          issueScene ? issueScene.title : '\uFF08\u5DF2\u5220\u573A\u6B21\uFF09',
+          cueLabel,
+          secondsToTimecode(issue.cueAtSecond),
+          linkedCue ? secondsToTimecode(linkedCue.atSecond) : '',
+          latest ? describeIssueTiming(latest.timingDirection, latest.offsetSeconds) : '',
+          issue.roleNames.join('\uFF0F'),
+          latest ? latest.situation : '',
+          linkStatus,
+        ]
+          .map(csvCell)
+          .join(','),
+      );
+    });
+  }
+
   return `\uFEFF${lines.join('\n')}`;
 }
 
@@ -135,9 +177,10 @@ export function exportPlayCsvFile(
   roles: ShadowRole[],
   cues: PercussionCue[],
   operators: Operator[],
+  issues: RehearsalIssue[] = [],
 ): string {
   const filename = `${play.title}-排练通告-${stampSuffix()}.csv`;
-  download(filename, exportPlayCsv(play, scenes, roles, cues, operators), 'text/csv;charset=utf-8');
+  download(filename, exportPlayCsv(play, scenes, roles, cues, operators, issues), 'text/csv;charset=utf-8');
   return filename;
 }
 
@@ -192,6 +235,8 @@ export function buildCallSheetText(
   scenes: Scene[],
   roles: ShadowRole[],
   operators: Operator[],
+  cues: PercussionCue[] = [],
+  issues: RehearsalIssue[] = [],
 ): string {
   const operatorName = (id: string | null): string =>
     id === null ? '待指派' : operators.find((item) => item.id === id)?.name ?? '（已解绑）';
@@ -213,5 +258,29 @@ export function buildCallSheetText(
         );
       });
     });
+  const openIssues = issues.filter((issue) => issue.status === 'open');
+  if (openIssues.length > 0) {
+    const sceneMap = new Map(scenes.map((scene) => [scene.id, scene]));
+    lines.push('');
+    lines.push(`未处理排练问题（${openIssues.length} 条；未清零前不能标成可上演）`);
+    openIssues.forEach((issue) => {
+      const scene = sceneMap.get(issue.sceneId);
+      const linkedCue = issue.cueId ? cues.find((cue) => cue.id === issue.cueId) : undefined;
+      const latest = issue.occurrences[issue.occurrences.length - 1];
+      const cueLabel = linkedCue ? BEAT_NAME_LABEL[linkedCue.beatName] : issue.cueBeatName || '（鼓点已删）';
+      const linkStatus = !linkedCue
+        ? '鼓点已删，需重新挂点'
+        : linkedCue.atSecond !== issue.cueAtSecond
+          ? `秒点已改为 ${secondsToTimecode(linkedCue.atSecond)}，需确认/重新挂点`
+          : '已挂点';
+      lines.push(
+        `  · 第${scene ? scene.seq : '?'}场 ${scene ? scene.title : '（场次已删）'}｜${cueLabel}｜原 ${secondsToTimecode(
+          issue.cueAtSecond,
+        )}｜${latest ? describeIssueTiming(latest.timingDirection, latest.offsetSeconds) : '偏差待补'}｜影人：${
+          issue.roleNames.join('／') || '待补'
+        }｜${latest ? latest.situation : '现场情况待补'}｜${linkStatus}`,
+      );
+    });
+  }
   return lines.join('\n');
 }

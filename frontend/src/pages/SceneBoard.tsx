@@ -3,7 +3,7 @@
  * 左列场序（拖拽调序 + 勾选本次排练覆盖），右侧场次明细；消费 Scene、Play，复用 <SceneCard>。
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   App,
   Button,
@@ -26,6 +26,7 @@ import {
 import {
   ArrowLeftOutlined,
   CheckSquareOutlined,
+  DownloadOutlined,
   PlusOutlined,
   SaveOutlined,
   SoundOutlined,
@@ -41,11 +42,20 @@ import { ROUTES } from '../router';
 import { SHADOW_SCREEN_LABEL, SHADOW_SCREEN_OPTIONS, type SceneDraft, createEmptySceneDraft } from '../types/scene';
 import { minutesToReadable } from '../utils/timecode';
 import { formatStamp } from '../utils/uuid';
-import type { SceneRow } from '../utils/db';
+import {
+  listAllIssues,
+  listCuesByScene,
+  listRolesByScenes,
+  listScenesByPlay,
+  type SceneRow,
+} from '../utils/db';
+import type { RehearsalIssue } from '../types/rehearsalIssue';
+import { exportPlayCsvFile } from '../utils/export';
 
 export default function SceneBoard() {
   const { id: playId = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { message, modal } = App.useApp();
   const [form] = Form.useForm<SceneDraft>();
 
@@ -77,11 +87,13 @@ export default function SceneBoard() {
   const setOnlySelected = useSceneStore((state) => state.setOnlySelected);
 
   const operators = useOperatorStore((state) => state.operators);
+  const loadOperators = useOperatorStore((state) => state.loadOperators);
 
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [openIssueCountByScene, setOpenIssueCountByScene] = useState<Record<string, number>>({});
 
   const play = plays.find((item) => item.id === playId) ?? null;
   const playStat = statOf(playId);
@@ -89,6 +101,10 @@ export default function SceneBoard() {
   useEffect(() => {
     if (playId) selectPlay(playId);
   }, [playId, selectPlay]);
+
+  useEffect(() => {
+    void loadOperators();
+  }, [loadOperators]);
 
   useEffect(() => {
     if (scenes.length > 0 && (activeSceneId === null || !scenes.some((scene) => scene.id === activeSceneId))) {
@@ -100,6 +116,24 @@ export default function SceneBoard() {
   useEffect(() => {
     if (playId && !loading) void syncSceneCount(playId);
   }, [playId, loading, syncSceneCount]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const rows = await listAllIssues();
+      if (cancelled) return;
+      const counts: Record<string, number> = {};
+      rows
+        .filter((issue) => issue.status === 'open')
+        .forEach((issue) => {
+          counts[issue.sceneId] = (counts[issue.sceneId] ?? 0) + 1;
+        });
+      setOpenIssueCountByScene(counts);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [scenes, location.key]);
 
   const activeItem = useMemo(() => items.find((item) => item.scene.id === activeSceneId) ?? null, [items, activeSceneId]);
   const visibleItems = onlySelected ? items.filter((item) => selectedSceneIds.includes(item.scene.id)) : items;
@@ -142,6 +176,24 @@ export default function SceneBoard() {
   const closeCreate = () => {
     setCreateOpen(false);
     form.resetFields();
+  };
+
+  const handleExportCsv = async () => {
+    if (!play) return;
+    const [dbScenes, roles, allIssues, cueGroups] = await Promise.all([
+      listScenesByPlay(playId),
+      listRolesByScenes(scenes.map((scene) => scene.id)),
+      listAllIssues(),
+      Promise.all(scenes.map((scene) => listCuesByScene(scene.id))),
+    ]);
+    const sceneIds = new Set(dbScenes.map((scene) => scene.id));
+    const issues: RehearsalIssue[] = allIssues.filter((issue) => sceneIds.has(issue.sceneId));
+    const filename = exportPlayCsvFile(play, dbScenes, roles, cueGroups.flat(), operators, issues);
+    message.success(
+      issues.filter((issue) => issue.status === 'open').length > 0
+        ? `已导出 ${filename}，通告末尾含未处理清单`
+        : `已导出 ${filename}`,
+    );
   };
 
   const confirmDelete = (sceneId: string, title: string) => {
@@ -188,6 +240,9 @@ export default function SceneBoard() {
           <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={openCreate}>
               新增场次
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={() => void handleExportCsv()}>
+              导出排练通告
             </Button>
             <Button
               icon={<TeamOutlined />}
@@ -313,9 +368,14 @@ export default function SceneBoard() {
                             void handleReorder(item.scene.id);
                           }}
                           extraActions={
-                            <Tag color={selectedSceneIds.includes(item.scene.id) ? '#7a1f1f' : 'default'}>
-                              {selectedSceneIds.includes(item.scene.id) ? '本次排练' : '本次跳过'}
-                            </Tag>
+                            <Space size={4}>
+                              {(openIssueCountByScene[item.scene.id] ?? 0) > 0 ? (
+                                <Tag color="error">问题 {openIssueCountByScene[item.scene.id]}</Tag>
+                              ) : null}
+                              <Tag color={selectedSceneIds.includes(item.scene.id) ? '#7a1f1f' : 'default'}>
+                                {selectedSceneIds.includes(item.scene.id) ? '本次排练' : '本次跳过'}
+                              </Tag>
+                            </Space>
                           }
                         />
                       </div>
@@ -335,8 +395,18 @@ export default function SceneBoard() {
                   startTimecode={activeItem.startTimecode}
                   accumulatedMinute={activeItem.accumulatedMinute}
                   operatorCount={operators.length}
+                  openIssueCount={openIssueCountByScene[activeItem.scene.id] ?? 0}
                   onSave={updateScene}
-                  onProgress={(delta) => void bumpProgress(activeItem.scene.id, delta)}
+                  onProgress={(delta) => {
+                    const openCount = openIssueCountByScene[activeItem.scene.id] ?? 0;
+                    const nextProgress = activeItem.scene.progress + delta;
+                    if (openCount > 0 && nextProgress >= 100) {
+                      void updateScene(activeItem.scene.id, { progress: 90 });
+                      message.warning('未处理排练问题未清零，进度最高记到 90%，不能标成可上演');
+                      return;
+                    }
+                    void bumpProgress(activeItem.scene.id, delta);
+                  }}
                   onDelete={() => confirmDelete(activeItem.scene.id, activeItem.scene.title)}
                   onRoles={() => navigate(ROUTES.roles(activeItem.scene.id))}
                   onCues={() => navigate(ROUTES.cues(activeItem.scene.id))}
@@ -404,6 +474,7 @@ interface SceneDetailPanelProps {
   startTimecode: string;
   accumulatedMinute: number;
   operatorCount: number;
+  openIssueCount: number;
   onSave: (
     sceneId: string,
     patch: Partial<Omit<SceneRow, 'id' | 'playId' | 'createdAt' | 'revision'>>,
@@ -419,6 +490,7 @@ function SceneDetailPanel({
   startTimecode,
   accumulatedMinute,
   operatorCount,
+  openIssueCount,
   onSave,
   onProgress,
   onDelete,
@@ -432,6 +504,13 @@ function SceneDetailPanel({
   const [stageNote, setStageNote] = useState(scene?.stageNote ?? '');
   const [screen, setScreen] = useState(scene?.needsShadowScreen ?? 'standard');
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (scene && openIssueCount > 0 && scene.progress >= 100) {
+      void onSave(sceneId, { progress: 90 });
+      message.warning('未处理排练问题未清零，本场不能标成可上演，已回到 90%');
+    }
+  }, [message, onSave, openIssueCount, scene, sceneId]);
 
   if (!scene) return null;
 
@@ -510,12 +589,27 @@ function SceneDetailPanel({
             <Button size="small" type="primary" ghost onClick={() => onProgress(10)}>
               +10%
             </Button>
-            <Button size="small" onClick={() => void onSave(sceneId, { progress: 100 })}>
+            <Button
+              size="small"
+              disabled={openIssueCount > 0}
+              onClick={() => {
+                if (openIssueCount > 0) {
+                  message.warning(`还有 ${openIssueCount} 条排练问题未处理，暂不能标记可上演`);
+                  return;
+                }
+                void onSave(sceneId, { progress: 100 });
+              }}
+            >
               标记可上演
             </Button>
           </Space>
         </Space>
         <Progress percent={scene.progress} strokeColor="#7a1f1f" />
+        {openIssueCount > 0 ? (
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            还有 {openIssueCount} 条排练问题未处理；可继续排练，但进度最高记到 90%，不能标成可上演。
+          </Typography.Text>
+        ) : null}
       </div>
 
       <Space wrap>

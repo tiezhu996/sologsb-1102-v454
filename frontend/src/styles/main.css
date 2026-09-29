@@ -150,6 +150,35 @@ body::before {
   border-radius: 4px;
 }
 
+.gb-cue-dot-issue i {
+  box-shadow: 0 0 0 2px rgba(180, 39, 39, 0.42), 0 0 8px rgba(180, 39, 39, 0.55);
+}
+
+.gb-issue-badge {
+  position: absolute;
+  top: -5px;
+  right: -13px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #b42727;
+  color: #fffdf8;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 17px;
+  text-align: center;
+  border: 1px solid #fffdf8;
+}
+
+.gb-issue-row-open > .ant-table-cell {
+  background: rgba(180, 39, 39, 0.055) !important;
+}
+
+.gb-issue-row-resolved > .ant-table-cell {
+  background: rgba(47, 111, 79, 0.045) !important;
+}
+
 .gb-playhead {
   position: absolute;
   top: 0;

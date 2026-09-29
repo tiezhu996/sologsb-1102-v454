@@ -118,13 +118,18 @@ export default function PlayList() {
   const submitForm = async () => {
     const values = await form.validateFields();
     if (editingId) {
-      await updatePlay(editingId, {
-        title: values.title.trim(),
-        genre: values.genre,
-        scriptText: values.scriptText.trim(),
-        premiereVenue: values.premiereVenue.trim(),
-        status: values.status,
-      });
+      try {
+        await updatePlay(editingId, {
+          title: values.title.trim(),
+          genre: values.genre,
+          scriptText: values.scriptText.trim(),
+          premiereVenue: values.premiereVenue.trim(),
+          status: values.status,
+        });
+      } catch (error) {
+        message.warning(error instanceof Error ? error.message : '剧目状态更新失败');
+        return;
+      }
       message.success('剧目信息已更新');
     } else {
       const created = await createPlay(values);
@@ -368,6 +373,11 @@ export default function PlayList() {
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           更新于 {formatStamp(play.updatedAt)}
                         </Typography.Text>
+                        {stat.openIssueCount > 0 ? (
+                          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                            {stat.openIssueCount} 条排练问题未处理，暂不能标成可上演
+                          </Typography.Text>
+                        ) : null}
                       </Space>
                     </Space>
                   </Card>
